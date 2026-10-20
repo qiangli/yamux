@@ -30,6 +30,13 @@ var (
 	ErrStreamReset            = errors.New("yamux: stream reset")
 )
 
+// Logger is the hashicorp-compatible logging interface.
+type Logger interface {
+	Print(v ...interface{})
+	Printf(format string, v ...interface{})
+	Println(v ...interface{})
+}
+
 // Config controls session limits and liveness checks.
 type Config struct {
 	AcceptBacklog          int
@@ -42,6 +49,8 @@ type Config struct {
 	MaxIncomingStreams     int
 	MaxStreamWindowSize    uint32
 	WriteCoalesceDelay     time.Duration
+	LogOutput              io.Writer
+	Logger                 Logger
 }
 
 // DefaultConfig returns a fresh configuration with protocol-safe defaults.
@@ -78,6 +87,9 @@ func VerifyConfig(c *Config) error {
 	}
 	if c.ConnectionWriteTimeout < 0 || c.StreamCloseTimeout < 0 || c.StreamOpenTimeout < 0 {
 		return errors.New("yamux: timeouts must not be negative")
+	}
+	if c.LogOutput != nil && c.Logger != nil {
+		return errors.New("yamux: either LogOutput or Logger may be set, not both")
 	}
 	return nil
 }
@@ -155,19 +167,20 @@ type Session struct {
 }
 
 // Client starts a client-mode session, whose outbound stream identifiers are odd.
-func Client(conn net.Conn, config *Config) (*Session, error) {
+func Client(conn io.ReadWriteCloser, config *Config) (*Session, error) {
 	return newSession(conn, config, clientMode)
 }
 
 // Server starts a server-mode session, whose outbound stream identifiers are even.
-func Server(conn net.Conn, config *Config) (*Session, error) {
+func Server(conn io.ReadWriteCloser, config *Config) (*Session, error) {
 	return newSession(conn, config, serverMode)
 }
 
-func newSession(conn net.Conn, config *Config, mode sessionMode) (*Session, error) {
+func newSession(conn io.ReadWriteCloser, config *Config, mode sessionMode) (*Session, error) {
 	if conn == nil {
 		return nil, errors.New("yamux: nil connection")
 	}
+	netConn := toNetConn(conn)
 	if config == nil {
 		config = DefaultConfig()
 	}
@@ -176,7 +189,7 @@ func newSession(conn net.Conn, config *Config, mode sessionMode) (*Session, erro
 		return nil, err
 	}
 	s := &Session{
-		conn:        conn,
+		conn:        netConn,
 		config:      cfg,
 		mode:        mode,
 		state:       SessionActive,
