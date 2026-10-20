@@ -1,9 +1,27 @@
 # yamux
 
-A permissively licensed (Apache-2.0 OR MIT) Go implementation of the
-[yamux](https://github.com/hashicorp/yamux/blob/master/spec.md) stream
-multiplexer. It is ported from [libp2p/rust-yamux](https://github.com/libp2p/rust-yamux)
-and wire-compatible with hashicorp/yamux and libp2p/go-yamux.
+A permissively licensed (Apache-2.0 OR MIT) Go implementation of the yamux
+stream multiplexer, wire-compatible with hashicorp/yamux and libp2p/go-yamux.
+
+## Clean-room implementation
+
+This is a **clean-room reimplementation**, based on two sources only:
+
+1. **HashiCorp's protocol specification**,
+   [`spec.md`](https://github.com/hashicorp/yamux/blob/master/spec.md). It is
+   read for the protocol's facts (frame layout, types, flags, window semantics,
+   ping, go-away, error codes) and is not copied or vendored here. Our own
+   description of the protocol is in [`PROTOCOL.md`](PROTOCOL.md).
+2. **The Rust implementation**,
+   [libp2p/rust-yamux](https://github.com/libp2p/rust-yamux) (Apache-2.0 OR MIT),
+   pinned at commit `6610cff7b3fe81aeb4fda9fa96d7ac4b3b2dbaf8`. Its design and
+   logic are ported to idiomatic Go.
+
+No source code from hashicorp/yamux or libp2p/go-yamux (both MPL-2.0) was read
+or copied. Only their public Go API (exported names and signatures) is matched,
+so this module works as a drop-in replacement. The stock MPL modules are used
+only in a separate, test-only interop module (`interop/`) to prove wire
+compatibility. They are never a dependency of this module.
 
 It is built as a **drop-in replacement** for both MPL-2.0 Go implementations:
 

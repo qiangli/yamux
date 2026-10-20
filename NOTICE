@@ -1,9 +1,12 @@
 qiangli/yamux
 
-This is a Go port of libp2p/rust-yamux (https://github.com/libp2p/rust-yamux),
-which is dual-licensed under Apache-2.0 OR MIT. Ported from upstream commit
-6610cff7b3fe81aeb4fda9fa96d7ac4b3b2dbaf8. The upstream copyright and license
-notices are retained in LICENSE-MIT and LICENSE-APACHE.
+This is a clean-room Go reimplementation of the yamux protocol based on:
+- HashiCorp's yamux specification (spec.md in github.com/hashicorp/yamux), read
+  for the protocol's facts only, not copied; and
+- libp2p/rust-yamux (https://github.com/libp2p/rust-yamux), dual-licensed under
+  Apache-2.0 OR MIT, ported from upstream commit
+  6610cff7b3fe81aeb4fda9fa96d7ac4b3b2dbaf8. The upstream copyright and license
+  notices are retained in LICENSE-MIT and LICENSE-APACHE.
 
 No source code from hashicorp/yamux or libp2p/go-yamux (both MPL-2.0) is
 included. Their public Go APIs (type, function and method names and signatures)
