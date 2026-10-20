@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  GOWORK: "off"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./...
+      - name: Test (race)
+        run: go test -race ./...
+      - name: Fuzz smoke (FuzzDecodeHeader, 60s)
+        run: go test -run '^$' -fuzz '^FuzzDecodeHeader$' -fuzztime 60s .
+
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Interop matrix vs stock hashicorp/yamux (race, no soak)
+        working-directory: interop
+        run: go test -race -skip 'TestSoak' ./...
+
+  license:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Shipped module has no third-party dependencies
+        run: |
+          deps=$(go list -deps -f '{{with .Module}}{{.Path}}{{end}}' ./... | sort -u | grep -v '^github.com/qiangli/yamux$' || true)
+          if [ -n "$deps" ]; then
+            echo "Unexpected non-stdlib dependencies in shipped module:" >&2
+            echo "$deps" >&2
+            echo "Each must be verified as Apache-2.0/MIT/BSD before allowing." >&2
+            exit 1
+          fi
+      - name: No MPL/GPL-family packages in root module graph
+        run: |
+          if go list -m all | grep -Ei 'hashicorp/yamux|libp2p/go-yamux'; then
+            echo "Forbidden MPL-2.0 dependency in root module" >&2
+            exit 1
+          fi
+      - name: Shipped license files are Apache-2.0 and MIT
+        run: |
+          grep -q 'Apache License' LICENSE-APACHE
+          grep -q 'MIT License' LICENSE-MIT
