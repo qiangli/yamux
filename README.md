@@ -34,6 +34,28 @@ Status: **work in progress.** Do not use it in production until the first
 tagged release passes the interop suite against stock hashicorp/yamux and
 libp2p/go-yamux in both directions.
 
+## Usage
+
+Import it as a normal module, or use it as a drop-in for the MPL-2.0
+implementations by adding a `replace` directive to your `go.mod`:
+
+```
+// Replace hashicorp/yamux (available now):
+replace github.com/hashicorp/yamux => github.com/qiangli/yamux v0.1.0
+
+// Replace libp2p/go-yamux/v5 (DEFERRED: the v5 compatibility package is
+// planned and not yet available; do not use yet):
+// replace github.com/libp2p/go-yamux/v5 => github.com/qiangli/yamux/v5 v0.1.0
+```
+
+Direct use:
+
+```go
+import "github.com/qiangli/yamux"
+
+session, err := yamux.Client(conn, nil)
+```
+
 ## License
 
 Dual-licensed under either of [Apache License 2.0](LICENSE-APACHE) or
