@@ -19,20 +19,22 @@ This is a **clean-room reimplementation**, based on two sources only:
 
 No source code from hashicorp/yamux or libp2p/go-yamux (both MPL-2.0) was read
 or copied. Only their public Go API (exported names and signatures) is matched,
-so this module works as a drop-in replacement. The stock MPL modules are used
-only in a separate, test-only interop module (`interop/`) to prove wire
-compatibility. They are never a dependency of this module.
+so these modules work as drop-in replacements. The stock MPL modules are used
+only in separate, test-only interop modules (`interop/` and
+`interop/v5replace/`) to prove wire and muxer compatibility. They are never a
+dependency of either shipped module.
 
 It is built as a **drop-in replacement** for both MPL-2.0 Go implementations:
 
 | Replaces | Package | Use |
 |---|---|---|
-| `github.com/hashicorp/yamux` | `github.com/qiangli/yamux` | `replace github.com/hashicorp/yamux => github.com/qiangli/yamux vX.Y.Z` |
-| `github.com/libp2p/go-yamux/v5` | see the v5 compatibility package (planned) | `replace github.com/libp2p/go-yamux/v5 => ...` |
+| `github.com/hashicorp/yamux` | `github.com/qiangli/yamux` | `replace github.com/hashicorp/yamux => github.com/qiangli/yamux v0.2.0` |
+| `github.com/libp2p/go-yamux/v5` | `github.com/qiangli/yamux/v5` | `replace github.com/libp2p/go-yamux/v5 => github.com/qiangli/yamux/v5 v5.0.0` |
 
-Status: **work in progress.** Do not use it in production until the first
-tagged release passes the interop suite against stock hashicorp/yamux and
-libp2p/go-yamux in both directions.
+Version `v0.2.0` includes the clean-room v5 adapter, published as the nested
+module `github.com/qiangli/yamux/v5` at `v5.0.0`. The interop suite checks
+both roles against the stock implementations, and the go-libp2p muxer
+conformance suite runs with the v5 replacement.
 
 ## Usage
 
@@ -40,12 +42,9 @@ Import it as a normal module, or use it as a drop-in for the MPL-2.0
 implementations by adding a `replace` directive to your `go.mod`:
 
 ```
-// Replace hashicorp/yamux (available now):
-replace github.com/hashicorp/yamux => github.com/qiangli/yamux v0.1.0
+replace github.com/hashicorp/yamux => github.com/qiangli/yamux v0.2.0
 
-// Replace libp2p/go-yamux/v5 (DEFERRED: the v5 compatibility package is
-// planned and not yet available; do not use yet):
-// replace github.com/libp2p/go-yamux/v5 => github.com/qiangli/yamux/v5 v0.1.0
+replace github.com/libp2p/go-yamux/v5 => github.com/qiangli/yamux/v5 v5.0.0
 ```
 
 Direct use:
