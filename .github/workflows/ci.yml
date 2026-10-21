@@ -24,6 +24,23 @@ jobs:
       - name: Fuzz smoke (FuzzDecodeHeader, 60s)
         run: go test -run '^$' -fuzz '^FuzzDecodeHeader$' -fuzztime 60s .
 
+  v5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build (v5 drop-in module)
+        working-directory: v5
+        run: go build ./...
+      - name: Test (v5 drop-in module)
+        working-directory: v5
+        run: go test ./...
+      - name: Test (v5 drop-in module, race)
+        working-directory: v5
+        run: go test -race ./...
+
   interop:
     runs-on: ubuntu-latest
     steps:
@@ -31,9 +48,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Interop matrix vs stock hashicorp/yamux (race, no soak)
+      - name: Interop matrix vs stock hashicorp/yamux and libp2p/go-yamux/v5 (race, no soak)
         working-directory: interop
         run: go test -race -skip 'TestSoak' ./...
+      - name: go-libp2p muxer on qiangli/yamux/v5 via the replace directive (race)
+        working-directory: interop/v5replace
+        run: go test -race ./...
 
   license:
     runs-on: ubuntu-latest
@@ -57,6 +77,23 @@ jobs:
             echo "Forbidden MPL-2.0 dependency in root module" >&2
             exit 1
           fi
+      - name: Shipped v5 module depends only on the core
+        working-directory: v5
+        run: |
+          deps=$(go list -deps -f '{{with .Module}}{{.Path}}{{end}}' ./... | sort -u | grep -vE '^github.com/qiangli/yamux(/v5)?$' || true)
+          if [ -n "$deps" ]; then
+            echo "Unexpected non-stdlib dependencies in the v5 module:" >&2
+            echo "$deps" >&2
+            exit 1
+          fi
+          if go list -m all | grep -Ei 'hashicorp/yamux|libp2p/go-yamux'; then
+            echo "Forbidden MPL-2.0 dependency in the v5 module" >&2
+            exit 1
+          fi
+      - name: Shipped v5 module carries the same licenses
+        run: |
+          grep -q 'Apache License' v5/LICENSE-APACHE
+          grep -q 'MIT License' v5/LICENSE-MIT
       - name: Shipped license files are Apache-2.0 and MIT
         run: |
           grep -q 'Apache License' LICENSE-APACHE

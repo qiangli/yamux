@@ -142,3 +142,50 @@ Non-ported crates: `test-harness` and `quickcheck-ext` are test tooling (`benche
 * Stream reads never hold the global session lock while blocking; only short critical sections touch shared state.
 * All timers are stopped and drained on stream/session close to avoid goroutine leaks.
 
+
+## 11. The `v5/` drop-in module
+
+`v5/` is a second Go module, `github.com/qiangli/yamux/v5`, laid out as a
+major-version subdirectory of this repository. It exists so a consumer of
+`github.com/libp2p/go-yamux/v5` can swap implementations without touching its
+own code:
+
+```
+replace github.com/libp2p/go-yamux/v5 => github.com/qiangli/yamux/v5 v5.0.0
+```
+
+It is an adapter, not a second protocol implementation: the root module owns
+every frame on the wire, and `v5/` owns only the shape of the API. The split in
+responsibilities is:
+
+| Concern | Lives in | Notes |
+|---|---|---|
+| Frames, windows, keepalive, go-away | root module | `header.go`, `session.go`, `stream.go` |
+| `Config` with the v5 field set, `DefaultConfig`, `VerifyConfig` | `v5/config.go` | Projected onto the core config by `coreConfig` |
+| `MemoryManager` accounting per stream | `v5/config.go`, `v5/session.go` | A span is opened per stream and closed once when it ends |
+| `Open`/`OpenStream` taking a `context.Context` | `v5/session.go` | Wraps the core's blocking open and resets an abandoned stream |
+| `Error`, `StreamError`, `GoAwayError` and the sentinels | `v5/errors.go` | Core sentinels are rewritten at every boundary |
+| `CloseWithError`, `ResetWithError` codes | `v5/session.go`, `v5/stream.go` | Carried by the core in the go-away and reset length fields |
+
+Three places where the v5 surface and the protocol do not line up, and what the
+adapter does about them:
+
+* **`CloseRead`.** Yamux has no read-close frame, so it takes effect locally:
+  later reads report the stream as reset, the write half is untouched, and the
+  peer stalls once it has filled the receive window.
+* **Stream error codes.** A v0 reset frame has no code field of its own, so the
+  code travels in the length field, which is unused for a reset. This matches
+  what `libp2p/go-yamux/v5` puts on the wire, confirmed by observing its output
+  rather than by reading it.
+* **`InitialStreamWindowSize`, `MaxMessageSize`, `ReadBufSize`, `PingBacklog`,
+  `MeasureRTTInterval`.** The core uses the protocol's fixed 256 KiB initial
+  window, splits writes into interleaving-sized frames, reads frames straight
+  off the transport, answers pings inline from its read loop, and refreshes the
+  round-trip time from each keepalive. These fields are validated and preserved
+  so a caller's configuration survives a round trip, but they do not change
+  behaviour.
+
+Gates for the module live in two places: `v5/v5_test.go` covers the API shape
+and the code-carrying paths, and `interop/v5replace/` is a test-only module that
+points the replace directive at `../../v5` and runs go-libp2p's own multiplexer
+conformance suite through its yamux muxer.

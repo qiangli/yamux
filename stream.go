@@ -36,6 +36,8 @@ type Stream struct {
 	remoteFIN     bool
 	readClosed    bool
 	resetErr      error
+	resetCode     uint32
+	resetRemote   bool
 	sessionErr    error
 	readDeadline  time.Time
 	writeDeadline time.Time
@@ -145,9 +147,11 @@ func (s *Stream) markRemoteFIN() bool {
 	return closed
 }
 
-func (s *Stream) remoteReset() {
+func (s *Stream) remoteReset(code uint32) {
 	s.mu.Lock()
 	s.resetErr = ErrStreamReset
+	s.resetCode = code
+	s.resetRemote = true
 	s.localFIN = true
 	s.remoteFIN = true
 	s.buffer.Reset()
@@ -296,14 +300,22 @@ func (s *Stream) CloseRead() error {
 	return s.Reset()
 }
 
-// Reset immediately tears down both stream directions with RST.
-func (s *Stream) Reset() error {
+// Reset immediately tears down both stream directions with RST, reporting the
+// normal code (0); see ResetWithError.
+func (s *Stream) Reset() error { return s.ResetWithError(GoAwayNormal) }
+
+// ResetWithError tears down both stream directions with RST and carries code in
+// the reset frame's length field, where the length is otherwise unused. The
+// peer reads it back from ResetError.
+func (s *Stream) ResetWithError(code uint32) error {
 	s.mu.Lock()
 	if s.resetErr != nil {
 		s.mu.Unlock()
 		return nil
 	}
 	s.resetErr = ErrStreamReset
+	s.resetCode = code
+	s.resetRemote = false
 	s.localFIN = true
 	s.remoteFIN = true
 	s.buffer.Reset()
@@ -311,13 +323,22 @@ func (s *Stream) Reset() error {
 	s.mu.Unlock()
 	signal(s.readNotify)
 	signal(s.writeNotify)
+	// Transmit before forgetting the stream. Dropping it from the session
+	// first would let a frame that arrives in the meantime take the
+	// unknown-stream path and queue a code-less reset ahead of this one,
+	// which the peer would then report as the reset code.
+	err := s.session.queueFrame(Header{Type: TypeWindowUpdate, Flags: FlagRST, StreamID: s.id, Length: code}, nil, deadline, true)
 	s.session.removeStream(s.id, s)
-	return s.session.queueFrame(Header{Type: TypeWindowUpdate, Flags: FlagRST, StreamID: s.id}, nil, deadline, true)
+	return err
 }
 
-// ResetWithError is the error-code-compatible form of Reset. Yamux v0 RST does
-// not carry an application error code, so code is intentionally not serialized.
-func (s *Stream) ResetWithError(code uint32) error { return s.Reset() }
+// ResetError reports the error code of a reset stream, whether the peer or this
+// endpoint initiated it, and whether the stream was reset at all.
+func (s *Stream) ResetError() (code uint32, remote bool, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resetCode, s.resetRemote, s.resetErr != nil
+}
 
 // Close gracefully sends FIN, then uses RST if the peer does not finish before
 // StreamCloseTimeout.

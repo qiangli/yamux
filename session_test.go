@@ -180,3 +180,68 @@ func TestPingMatchesPongIdentifier(t *testing.T) {
 		t.Fatal("session stayed active after mismatched pong")
 	}
 }
+
+// TestConcurrentOpenKeepsIdentifiersOrdered opens many streams at once from
+// both ends. The protocol requires inbound identifiers to increase, so a SYN
+// that overtakes an earlier one makes the peer reject the session; accepting
+// every stream proves the opens reach the wire in the order they were claimed.
+func TestConcurrentOpenStreamsKeepsIdentifiersOrdered(t *testing.T) {
+	client, server := newTestSessionPair(t, DefaultConfig())
+	defer closeSessionPair(t, client, server)
+
+	const perSide = 64
+	for _, dir := range []struct {
+		name             string
+		opener, accepter *Session
+	}{
+		{"client-to-server", client, server},
+		{"server-to-client", server, client},
+	} {
+		t.Run(dir.name, func(t *testing.T) {
+			accepted := make(chan uint32, perSide)
+			acceptErr := make(chan error, 1)
+			go func() {
+				for i := 0; i < perSide; i++ {
+					stream, err := dir.accepter.AcceptStream()
+					if err != nil {
+						acceptErr <- err
+						return
+					}
+					accepted <- stream.StreamID()
+				}
+				acceptErr <- nil
+			}()
+
+			openErrs := make(chan error, perSide)
+			for i := 0; i < perSide; i++ {
+				go func() {
+					_, err := dir.opener.OpenStream()
+					openErrs <- err
+				}()
+			}
+			for i := 0; i < perSide; i++ {
+				if err := <-openErrs; err != nil {
+					t.Fatalf("OpenStream: %v", err)
+				}
+			}
+
+			select {
+			case err := <-acceptErr:
+				if err != nil {
+					t.Fatalf("AcceptStream: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("accepted only %d of %d streams", len(accepted), perSide)
+			}
+
+			var previous uint32
+			for i := 0; i < perSide; i++ {
+				id := <-accepted
+				if id <= previous {
+					t.Fatalf("stream %d arrived with identifier %d after %d", i, id, previous)
+				}
+				previous = id
+			}
+		})
+	}
+}
