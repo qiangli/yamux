@@ -13,8 +13,16 @@ import (
 const (
 	// DefaultStreamWindow is the protocol-defined initial credit of a stream.
 	DefaultStreamWindow = 256 * 1024
-	defaultFrameSize    = 16 * 1024
-	maxDataFrameSize    = 16 * 1024 * 1024
+
+	// GoAwayNormal, GoAwayProtocolError and GoAwayInternalError are the three
+	// go-away codes defined by the protocol. Larger values are application
+	// defined and are passed through untouched.
+	GoAwayNormal        uint32 = 0
+	GoAwayProtocolError uint32 = 1
+	GoAwayInternalError uint32 = 2
+
+	defaultFrameSize = 16 * 1024
+	maxDataFrameSize = 16 * 1024 * 1024
 )
 
 var (
@@ -140,15 +148,21 @@ type Session struct {
 	config Config
 	mode   sessionMode
 
-	mu              sync.Mutex
-	state           SessionState
-	localGoAway     bool
-	remoteGoAway    bool
-	closeErr        error
-	nextID          uint32
-	highestRemoteID uint32
-	streams         map[uint32]*Stream
-	stateNotify     chan struct{}
+	mu               sync.Mutex
+	state            SessionState
+	localGoAway      bool
+	localGoAwayCode  uint32
+	remoteGoAway     bool
+	remoteGoAwayCode uint32
+	closeErr         error
+	nextID           uint32
+	highestRemoteID  uint32
+	streams          map[uint32]*Stream
+	stateNotify      chan struct{}
+
+	// openMu serialises outbound opens so an identifier and its SYN reach
+	// the write queue together; see OpenStream.
+	openMu sync.Mutex
 
 	acceptCh  chan *Stream
 	writeCh   chan outboundFrame
@@ -236,6 +250,27 @@ func (s *Session) signalState() {
 
 // OpenStream creates an outbound stream and transmits its SYN.
 func (s *Session) OpenStream() (*Stream, error) {
+	// The protocol requires inbound stream identifiers to increase, so
+	// claiming an identifier and queueing its SYN has to be one step:
+	// concurrent opens would otherwise be able to reach the wire reversed
+	// and the peer would reject the whole session.
+	s.openMu.Lock()
+	stream, written, err := s.startStream()
+	s.openMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.awaitFrame(written); err != nil {
+		s.removeStream(stream.id, stream)
+		stream.sessionClosed(err)
+		return nil, err
+	}
+	return stream, nil
+}
+
+// startStream claims the next outbound identifier, registers the stream and
+// queues its SYN. The caller must hold openMu.
+func (s *Session) startStream() (*Stream, chan error, error) {
 	s.mu.Lock()
 	if s.state == SessionClosed {
 		err := s.closeErr
@@ -243,24 +278,24 @@ func (s *Session) OpenStream() (*Stream, error) {
 			err = ErrSessionShutdown
 		}
 		s.mu.Unlock()
-		return nil, err
+		return nil, nil, err
 	}
 	if s.remoteGoAway {
 		s.mu.Unlock()
-		return nil, ErrRemoteGoAway
+		return nil, nil, ErrRemoteGoAway
 	}
 	if s.localGoAway || s.state != SessionActive {
 		s.mu.Unlock()
-		return nil, ErrSessionShutdown
+		return nil, nil, ErrSessionShutdown
 	}
 	if len(s.streams) >= s.config.MaxIncomingStreams*2 {
 		s.mu.Unlock()
-		return nil, errors.New("yamux: maximum number of streams reached")
+		return nil, nil, errors.New("yamux: maximum number of streams reached")
 	}
 	id := s.nextID
 	if id == 0 {
 		s.mu.Unlock()
-		return nil, ErrStreamsExhausted
+		return nil, nil, ErrStreamsExhausted
 	}
 	if id > math.MaxUint32-2 {
 		s.nextID = 0
@@ -276,12 +311,13 @@ func (s *Session) OpenStream() (*Stream, error) {
 	if s.config.StreamOpenTimeout > 0 {
 		deadline = time.Now().Add(s.config.StreamOpenTimeout)
 	}
-	if err := s.queueFrame(h, nil, deadline, true); err != nil {
+	written, err := s.enqueueFrame(h, nil, deadline)
+	if err != nil {
 		s.removeStream(id, stream)
 		stream.sessionClosed(err)
-		return nil, err
+		return nil, nil, err
 	}
-	return stream, nil
+	return stream, written, nil
 }
 
 // Open is the net.Conn-typed compatibility form of OpenStream.
@@ -337,7 +373,13 @@ func (s *Session) NumStreams() int {
 }
 
 // GoAway stops new streams while leaving existing streams available to drain.
-func (s *Session) GoAway() error {
+// It reports the normal go-away code (0); see GoAwayWithCode.
+func (s *Session) GoAway() error { return s.GoAwayWithCode(GoAwayNormal) }
+
+// GoAwayWithCode is GoAway with an explicit error code carried in the GoAway
+// frame's length field. Codes above GoAwayInternalError are application
+// defined; the peer reads them back with RemoteGoAwayCode.
+func (s *Session) GoAwayWithCode(code uint32) error {
 	s.mu.Lock()
 	if s.state == SessionClosed {
 		err := s.closeErr
@@ -352,10 +394,27 @@ func (s *Session) GoAway() error {
 		return nil
 	}
 	s.localGoAway = true
+	s.localGoAwayCode = code
 	s.state = SessionClosing
 	s.mu.Unlock()
 	s.signalState()
-	return s.queueFrame(Header{Type: TypeGoAway}, nil, time.Time{}, true)
+	return s.queueFrame(Header{Type: TypeGoAway, Length: code}, nil, time.Time{}, true)
+}
+
+// LocalGoAwayCode reports the code this endpoint sent in its GoAway frame, and
+// whether a GoAway has been sent at all.
+func (s *Session) LocalGoAwayCode() (uint32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.localGoAwayCode, s.localGoAway
+}
+
+// RemoteGoAwayCode reports the code carried by a GoAway frame received from the
+// peer, and whether such a frame arrived.
+func (s *Session) RemoteGoAwayCode() (uint32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remoteGoAwayCode, s.remoteGoAway
 }
 
 // Close sends a normal GoAway and terminates the transport and all goroutines.
@@ -463,18 +522,31 @@ func (s *Session) keepaliveLoop() {
 }
 
 func (s *Session) queueFrame(h Header, body []byte, deadline time.Time, wait bool) error {
-	frame := outboundFrame{header: h, body: body}
-	if wait {
-		frame.written = make(chan error, 1)
+	if !wait {
+		frame := outboundFrame{header: h, body: body}
+		return sendBefore(s.writeCh, frame, deadline, s.done)
 	}
-	if err := sendBefore(s.writeCh, frame, deadline, s.done); err != nil {
+	written, err := s.enqueueFrame(h, body, deadline)
+	if err != nil {
 		return err
 	}
-	if !wait {
-		return nil
+	return s.awaitFrame(written)
+}
+
+// enqueueFrame places a frame on the write queue without waiting for it to
+// reach the transport, and returns the channel its write result arrives on.
+func (s *Session) enqueueFrame(h Header, body []byte, deadline time.Time) (chan error, error) {
+	frame := outboundFrame{header: h, body: body, written: make(chan error, 1)}
+	if err := sendBefore(s.writeCh, frame, deadline, s.done); err != nil {
+		return nil, err
 	}
+	return frame.written, nil
+}
+
+// awaitFrame waits for an enqueued frame to reach the transport.
+func (s *Session) awaitFrame(written chan error) error {
 	select {
-	case err := <-frame.written:
+	case err := <-written:
 		return err
 	case <-s.done:
 		s.mu.Lock()
@@ -644,6 +716,7 @@ func (s *Session) handleFrame(h Header, body []byte) error {
 		s.mu.Lock()
 		if s.state != SessionClosed {
 			s.remoteGoAway = true
+			s.remoteGoAwayCode = h.Length
 			s.state = SessionClosing
 		}
 		s.mu.Unlock()
@@ -686,10 +759,15 @@ func (s *Session) handleStreamFrame(h Header, body []byte) error {
 		return s.handleNewStream(h, body)
 	}
 	if stream == nil {
+		// Never answer a reset with a reset: both peers forget the stream,
+		// so a reply would bounce back and forth forever.
+		if h.Flags.Contains(FlagRST) {
+			return nil
+		}
 		return s.queueFrame(Header{Type: TypeWindowUpdate, Flags: FlagRST, StreamID: h.StreamID}, nil, time.Time{}, false)
 	}
 	if h.Flags.Contains(FlagRST) {
-		stream.remoteReset()
+		stream.remoteReset(h.Length)
 		s.removeStream(h.StreamID, stream)
 		return nil
 	}
@@ -773,7 +851,7 @@ func (s *Session) handleNewStream(h Header, body []byte) error {
 		return nil
 	default:
 		s.removeStream(h.StreamID, stream)
-		stream.remoteReset()
+		stream.remoteReset(GoAwayNormal)
 		return s.queueFrame(Header{Type: TypeWindowUpdate, Flags: FlagRST, StreamID: h.StreamID}, nil, time.Time{}, false)
 	}
 }
