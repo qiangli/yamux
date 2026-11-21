@@ -2,7 +2,7 @@ module github.com/qiangli/yamux/v5
 
 go 1.27
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 // The core lives in the repository root as github.com/qiangli/yamux. The
 // required version is the tag that carries the GoAwayWithCode / ResetError
